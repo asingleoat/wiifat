@@ -213,5 +213,9 @@ def test_dashboard_measurements_exclude_hidden_users_without_reclassifying_them(
     dashboard_ids = {
         item.id for item in database.fetch_dashboard_measurements()
     }
+    dashboard_recent_ids = [
+        item.id for item in database.fetch_dashboard_recent(2)
+    ]
 
     assert dashboard_ids == {visible_id, unassigned_id}
+    assert dashboard_recent_ids == [unassigned_id, visible_id]

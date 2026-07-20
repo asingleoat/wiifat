@@ -61,6 +61,12 @@ _MEASUREMENT_COLUMNS = """
     raw_kg, cal_json, battery_pct, user_id, assign_method, assign_confidence
 """
 
+_JOINED_MEASUREMENT_COLUMNS = """
+    m.id, m.ts, m.weight_kg, m.stdev_kg, m.tare_kg, m.corners_json,
+    m.duration_s, m.raw_kg, m.cal_json, m.battery_pct, m.user_id,
+    m.assign_method, m.assign_confidence
+"""
+
 
 class DuplicateUserNameError(Exception):
     """Raised when a user rename conflicts with an existing display name."""
@@ -195,22 +201,39 @@ class Database:
         self, since: date | datetime | str | None = None
     ) -> list[Measurement]:
         """Return unassigned and visible-user measurements, oldest first."""
-        conditions = [
-            "(user_id IS NULL OR user_id IN (SELECT id FROM users WHERE hidden = 0))"
-        ]
+        conditions = ["(m.user_id IS NULL OR u.hidden = 0)"]
         parameters: list[object] = []
         if since is not None:
-            conditions.append("ts >= ?")
+            conditions.append("m.ts >= ?")
             parameters.append(_normalise_since(since))
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT {_MEASUREMENT_COLUMNS}
-                FROM measurements
+                SELECT {_JOINED_MEASUREMENT_COLUMNS}
+                FROM measurements AS m
+                LEFT JOIN users AS u ON u.id = m.user_id
                 WHERE {' AND '.join(conditions)}
-                ORDER BY ts ASC, id ASC
+                ORDER BY m.ts ASC, m.id ASC
                 """,
                 parameters,
+            ).fetchall()
+        return [_row_to_measurement(row) for row in rows]
+
+    def fetch_dashboard_recent(self, n: int = 20) -> list[Measurement]:
+        """Return a full page of recent unassigned or visible-user rows."""
+        if n < 0:
+            raise ValueError("n must be nonnegative")
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {_JOINED_MEASUREMENT_COLUMNS}
+                FROM measurements AS m
+                LEFT JOIN users AS u ON u.id = m.user_id
+                WHERE m.user_id IS NULL OR u.hidden = 0
+                ORDER BY m.ts DESC, m.id DESC
+                LIMIT ?
+                """,
+                (n,),
             ).fetchall()
         return [_row_to_measurement(row) for row in rows]
 

@@ -226,16 +226,20 @@ _DASHBOARD = """
     const kg = Number(data.weight_kg);
     const pounds = kg * {{ pounds_per_kg }};
     setText(`${kg.toFixed(2)} kg / ${pounds.toFixed(1)} lb`);
-    const badge = document.createElement("span");
-    badge.className = "badge";
+    const resultNote = document.createElement("span");
     if (data.user) {
-      badge.style.background = data.user.color;
-      badge.textContent = data.user.name;
+      resultNote.className = "badge";
+      resultNote.style.background = data.user.color;
+      resultNote.textContent = data.user.name;
+    } else if (data.assigned) {
+      resultNote.className = "muted";
+      resultNote.textContent = "recorded";
     } else {
-      badge.style.background = unassignedColor;
-      badge.textContent = "unclaimed";
+      resultNote.className = "badge";
+      resultNote.style.background = unassignedColor;
+      resultNote.textContent = "unclaimed";
     }
-    message.append(document.createTextNode(" "), badge);
+    message.append(document.createTextNode(" "), resultNote);
     showBattery(data.battery_pct);
     window.setTimeout(() => window.location.reload(), 1500);
   });
@@ -437,6 +441,12 @@ def create_app(
         with status_lock:
             status.battery_pct = measurement.battery_pct
         publisher.publish("status", status_payload())
+        visible_assignee = (
+            assigned_user
+            if assigned_user is not None and not assigned_user.hidden
+            else None
+        )
+        was_assigned = result.assigned_user_id is not None
         publisher.publish(
             "measurement",
             {
@@ -446,16 +456,17 @@ def create_app(
                 "battery_pct": measurement.battery_pct,
                 "user": (
                     {
-                        "id": assigned_user.id,
-                        "name": assigned_user.name,
-                        "color": assigned_user.color,
+                        "id": visible_assignee.id,
+                        "name": visible_assignee.name,
+                        "color": visible_assignee.color,
                     }
-                    if assigned_user is not None
+                    if visible_assignee is not None
                     else None
                 ),
-                "method": "auto" if assigned_user is not None else None,
+                "assigned": was_assigned,
+                "method": "auto" if was_assigned else None,
                 "confidence": (
-                    result.confidence if assigned_user is not None else None
+                    result.confidence if was_assigned else None
                 ),
             },
         )
@@ -511,7 +522,7 @@ def create_app(
     def dashboard() -> str:
         all_users = database.list_users()
         users = [user for user in all_users if not user.hidden]
-        latest = database.fetch_recent(20)
+        latest = database.fetch_dashboard_recent(20)
         summaries = []
         for user in users:
             history = database.fetch_for_user(user.id, newest_first=True)

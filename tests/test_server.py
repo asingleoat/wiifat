@@ -66,6 +66,8 @@ def test_flask_user_recognition_claim_unassign_chart_and_apis(tmp_path):
     assert b'new EventSource("/events")' in dashboard.data
     assert b"live-progress-fill" in dashboard.data
     assert b"window.location.reload()" in dashboard.data
+    assert b"data.assigned" in dashboard.data
+    assert b'resultNote.textContent = "recorded"' in dashboard.data
 
     user_page = client.get(f"/user/{alice.id}")
     assert user_page.status_code == 200
@@ -210,6 +212,16 @@ def test_hidden_user_dashboard_toggle_api_and_recognition_semantics(tmp_path):
     hidden = database.create_user("Hidden", 82.0, timestamp=start)
     hidden = database.set_user_hidden(hidden.id, True)
 
+    visible_measurement_id = database.insert(
+        measurement(start + DAY / 2.0, 65.1)
+    )
+    database.assign_measurement(
+        visible_measurement_id,
+        visible.id,
+        method="manual",
+        confidence=None,
+    )
+
     assigned_id, result = extension["inject_measurement"](
         measurement(start + DAY, 82.1)
     )
@@ -225,7 +237,11 @@ def test_hidden_user_dashboard_toggle_api_and_recognition_semantics(tmp_path):
     hidden_badge = (
         f'<span class="badge" style="background: {hidden.color}">Hidden</span>'
     ).encode()
-    assert hidden_badge in dashboard.data
+    assert hidden_badge not in dashboard.data
+    assert b"Hidden" not in dashboard.data
+    assert b"82.10 kg" not in dashboard.data
+    assert b"65.10 kg" in dashboard.data
+    assert b"110.00 kg" in dashboard.data
 
     user_page = client.get(f"/user/{hidden.id}")
     assert user_page.status_code == 200
@@ -299,8 +315,50 @@ def test_sse_measurement_event_contains_recognition_and_stored_color(tmp_path):
         "name": "Alice",
         "color": alice.color,
     }
+    assert measurement_payload["assigned"] is True
     assert measurement_payload["method"] == "auto"
     assert measurement_payload["confidence"] >= 0.90
+
+
+def test_sse_hidden_assignment_is_anonymous_but_marked_recorded(tmp_path):
+    app = create_app(str(tmp_path / "hidden-events.sqlite3"))
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    extension = app.extensions["wiifat"]
+    database = extension["database"]
+    start = 1_700_000_000.0
+    hidden = database.create_user("Private Person", 82.0, timestamp=start)
+    database.set_user_hidden(hidden.id, True)
+
+    response = client.get("/events", buffered=False)
+    measurement_id, result = extension["inject_measurement"](
+        measurement(start + DAY, 82.1)
+    )
+    assert result.assigned_user_id == hidden.id
+
+    measurement_payload = None
+    measurement_chunk = None
+    for _ in range(4):
+        chunk = next(response.response).decode()
+        if chunk.startswith("event: measurement\n"):
+            measurement_chunk = chunk
+            data_line = next(
+                line for line in chunk.splitlines() if line.startswith("data: ")
+            )
+            measurement_payload = json.loads(data_line.removeprefix("data: "))
+            break
+    response.close()
+
+    stored = database.fetch_measurement(measurement_id)
+    assert stored is not None
+    assert stored.user_id == hidden.id
+    assert measurement_payload is not None
+    assert measurement_payload["user"] is None
+    assert measurement_payload["assigned"] is True
+    assert measurement_payload["method"] == "auto"
+    assert measurement_chunk is not None
+    assert hidden.name not in measurement_chunk
+    assert hidden.color not in measurement_chunk
 
 
 def test_progress_publication_is_throttled_but_state_transitions_are_immediate(

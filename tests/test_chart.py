@@ -68,6 +68,7 @@ def test_chart_smoke(tmp_path, monkeypatch):
     database.assign_measurement(
         measurement_ids[3], single_user.id, method="manual", confidence=None
     )
+    single_user = database.set_user_hidden(single_user.id, True)
 
     plotted_colors = []
     original_plot_user = chart_module._plot_user
@@ -82,6 +83,7 @@ def test_chart_smoke(tmp_path, monkeypatch):
     assert output_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     assert output_path.stat().st_size > 0
     assert (user.name, stored_color) in plotted_colors
+    assert (single_user.name, single_user.color) not in plotted_colors
 
     user_path = render_chart(
         database_path, tmp_path / "user-chart.png", user_id=user.id
@@ -92,3 +94,4 @@ def test_chart_smoke(tmp_path, monkeypatch):
         database_path, tmp_path / "single-chart.png", user_id=single_user.id
     )
     assert single_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert (single_user.name, single_user.color) in plotted_colors

@@ -114,9 +114,8 @@ def test_database_migrates_old_schema_and_preserves_old_rows(tmp_path):
         "assign_confidence",
     } <= columns
     connection = sqlite3.connect(path)
-    user_columns = {
-        row[1] for row in connection.execute("PRAGMA table_info(users)")
-    }
+    user_column_info = connection.execute("PRAGMA table_info(users)").fetchall()
+    user_columns = {row[1] for row in user_column_info}
     connection.close()
     assert {
         "id",
@@ -127,10 +126,15 @@ def test_database_migrates_old_schema_and_preserves_old_rows(tmp_path):
         "sigma_kg",
         "last_seen_ts",
         "weigh_count",
+        "hidden",
     } <= user_columns
+    hidden_column = next(row for row in user_column_info if row[1] == "hidden")
+    assert hidden_column[3] == 1
+    assert str(hidden_column[4]) == "0"
     migrated_user = database.get_user(1)
     assert migrated_user is not None
     assert migrated_user.color == user_color("Alice")
+    assert migrated_user.hidden is False
     assert old_row.weight_kg == pytest.approx(70.2)
     assert old_row.raw_kg is None
     assert old_row.cal_json is None
@@ -148,6 +152,8 @@ def test_user_crud_assignment_and_filtered_measurements(tmp_path):
     assert bob.color == user_color("Bob")
     assert alice.weigh_count == 1
     assert bob.weigh_count == 0
+    assert alice.hidden is False
+    assert bob.hidden is False
     alice_measurement = database.insert(measurement(1_700_001_000.0, 70.2))
     unclaimed_measurement = database.insert(measurement(1_700_002_000.0, 82.0))
 
@@ -172,6 +178,12 @@ def test_user_crud_assignment_and_filtered_measurements(tmp_path):
     with pytest.raises(ValueError, match="must not be empty"):
         database.rename_user(bob.id, "   ")
     assert database.get_user(bob.id) == renamed
+    hidden_bob = database.set_user_hidden(bob.id, True)
+    assert hidden_bob.hidden is True
+    assert [user.id for user in database.list_visible_users()] == [alice.id]
+    assert Database(database.path).get_user(bob.id).hidden is True
+    visible_bob = database.set_user_hidden(bob.id, False)
+    assert visible_bob.hidden is False
     database.unassign_measurement(alice_measurement)
     assert {item.id for item in database.fetch_unassigned()} == {
         alice_measurement,
@@ -179,3 +191,27 @@ def test_user_crud_assignment_and_filtered_measurements(tmp_path):
     }
     database.delete_user(bob.id)
     assert database.get_user(bob.id) is None
+
+
+def test_dashboard_measurements_exclude_hidden_users_without_reclassifying_them(
+    tmp_path,
+):
+    database = Database(tmp_path / "dashboard.sqlite3")
+    visible = database.create_user("Visible", 70.0)
+    hidden = database.create_user("Hidden", 80.0)
+    visible_id = database.insert(measurement(1_700_000_000.0, 70.1))
+    hidden_id = database.insert(measurement(1_700_000_100.0, 80.1))
+    unassigned_id = database.insert(measurement(1_700_000_200.0, 90.1))
+    database.assign_measurement(
+        visible_id, visible.id, method="manual", confidence=None
+    )
+    database.assign_measurement(
+        hidden_id, hidden.id, method="manual", confidence=None
+    )
+    database.set_user_hidden(hidden.id, True)
+
+    dashboard_ids = {
+        item.id for item in database.fetch_dashboard_measurements()
+    }
+
+    assert dashboard_ids == {visible_id, unassigned_id}

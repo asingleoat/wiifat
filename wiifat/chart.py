@@ -134,10 +134,13 @@ def render_chart_png(
         if days is not None:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
             measurements = [item for item in measurements if item.timestamp >= cutoff]
-    elif days is None:
-        measurements = database.fetch_all()
     else:
-        measurements = database.fetch_since(datetime.now(timezone.utc) - timedelta(days=days))
+        since = (
+            None
+            if days is None
+            else datetime.now(timezone.utc) - timedelta(days=days)
+        )
+        measurements = database.fetch_dashboard_measurements(since)
 
     figure, axis = plt.subplots(figsize=(9, 5))
     if user_id is not None:
@@ -149,7 +152,7 @@ def render_chart_png(
             [(item.timestamp, item.weight_kg) for item in measurements],
         )
     else:
-        users = {user.id: user for user in database.list_users()}
+        users = {user.id: user for user in database.list_visible_users()}
         grouped: dict[int | None, list[tuple[float, float]]] = {}
         for item in measurements:
             group_id = item.user_id if item.user_id in users else None

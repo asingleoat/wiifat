@@ -256,6 +256,10 @@ _USER_PAGE = """
 <form class="rename-fallback" method="post" action="{{ url_for('rename_user_route', user_id=user.id) }}">
   <label>Display name <input name="name" required value="{{ user.name }}"></label><button type="submit">Rename</button>
 </form>
+<form id="hidden-user-form" method="post" action="{{ url_for('set_user_hidden_route', user_id=user.id) }}">
+  <label><input id="hidden-user-toggle" type="checkbox" name="hidden" value="1"{% if user.hidden %} checked{% endif %}> Hide from dashboard</label>
+  <button type="submit">Save</button>
+</form>
 <p>{{ history|length }} assigned measurements. Model:
 {% if user.mu_kg is not none %}μ {{ '%.2f'|format(user.mu_kg) }} kg,
 σ {{ '%.2f'|format(user.sigma_kg) }} kg{% else %}unseeded{% endif %}.</p>
@@ -265,6 +269,11 @@ _USER_PAGE = """
 <td>{{ item.assign_method or '—' }}</td><td><form method="post" action="{{ url_for('unassign_route') }}"><input type="hidden" name="measurement_id" value="{{ item.id }}"><button>Unassign</button></form></td></tr>
 {% endfor %}</table>
 {{ rename_script|safe }}
+<script>
+document.getElementById("hidden-user-toggle").addEventListener("change", (event) => {
+  event.target.form.submit();
+});
+</script>
 """
 
 
@@ -500,7 +509,8 @@ def create_app(
 
     @app.get("/")
     def dashboard() -> str:
-        users = database.list_users()
+        all_users = database.list_users()
+        users = [user for user in all_users if not user.hidden]
         latest = database.fetch_recent(20)
         summaries = []
         for user in users:
@@ -518,7 +528,7 @@ def create_app(
             summaries=summaries,
             latest=latest,
             unclaimed=database.fetch_unassigned(20),
-            users_by_id={user.id: user for user in users},
+            users_by_id={user.id: user for user in all_users},
             unassigned_color=UNASSIGNED_COLOR,
             pounds_per_kg=POUNDS_PER_KG,
         )
@@ -604,6 +614,14 @@ def create_app(
         if wants_json:
             return jsonify({"ok": True, "id": user.id, "name": user.name})
         return redirect(request.referrer or url_for("dashboard"))
+
+    @app.post("/users/<int:user_id>/hidden")
+    def set_user_hidden_route(user_id: int) -> Response:
+        try:
+            database.set_user_hidden(user_id, "hidden" in request.form)
+        except KeyError:
+            abort(404)
+        return redirect(url_for("user_page", user_id=user_id))
 
     @app.post("/assign")
     def assign_route() -> Response:
@@ -767,6 +785,7 @@ def _user_json(user: User) -> dict[str, object]:
         "sigma_kg": user.sigma_kg,
         "last_seen_ts": user.last_seen_ts,
         "weigh_count": user.weigh_count,
+        "hidden": user.hidden,
     }
 
 

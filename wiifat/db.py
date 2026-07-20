@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS users(
     mu_kg REAL,
     sigma_kg REAL,
     last_seen_ts TEXT,
-    weigh_count INTEGER NOT NULL DEFAULT 0
+    weigh_count INTEGER NOT NULL DEFAULT 0,
+    hidden INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -77,6 +78,7 @@ class User:
     sigma_kg: float | None
     last_seen_ts: str | None
     weigh_count: int
+    hidden: bool
 
 
 def format_timestamp(timestamp: float) -> str:
@@ -99,6 +101,11 @@ class Database:
             }
             if "color" not in user_columns:
                 connection.execute("ALTER TABLE users ADD COLUMN color TEXT")
+            if "hidden" not in user_columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"
+                )
+            connection.execute("UPDATE users SET hidden = 0 WHERE hidden IS NULL")
             users_without_color = connection.execute(
                 "SELECT id, name FROM users WHERE color IS NULL OR color = ''"
             ).fetchall()
@@ -184,6 +191,29 @@ class Database:
             ).fetchall()
         return [_row_to_measurement(row) for row in rows]
 
+    def fetch_dashboard_measurements(
+        self, since: date | datetime | str | None = None
+    ) -> list[Measurement]:
+        """Return unassigned and visible-user measurements, oldest first."""
+        conditions = [
+            "(user_id IS NULL OR user_id IN (SELECT id FROM users WHERE hidden = 0))"
+        ]
+        parameters: list[object] = []
+        if since is not None:
+            conditions.append("ts >= ?")
+            parameters.append(_normalise_since(since))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {_MEASUREMENT_COLUMNS}
+                FROM measurements
+                WHERE {' AND '.join(conditions)}
+                ORDER BY ts ASC, id ASC
+                """,
+                parameters,
+            ).fetchall()
+        return [_row_to_measurement(row) for row in rows]
+
     def fetch_measurement(self, measurement_id: int) -> Measurement | None:
         """Return one measurement by id, or ``None`` when absent."""
         with self._connect() as connection:
@@ -256,7 +286,7 @@ class Database:
             row = connection.execute(
                 """
                 SELECT id, name, color, created_ts, mu_kg, sigma_kg,
-                       last_seen_ts, weigh_count
+                       last_seen_ts, weigh_count, hidden
                 FROM users WHERE id = ?
                 """,
                 (user_id,),
@@ -269,11 +299,15 @@ class Database:
             rows = connection.execute(
                 """
                 SELECT id, name, color, created_ts, mu_kg, sigma_kg,
-                       last_seen_ts, weigh_count
+                       last_seen_ts, weigh_count, hidden
                 FROM users ORDER BY name COLLATE NOCASE, id
                 """
             ).fetchall()
         return [_row_to_user(row) for row in rows]
+
+    def list_visible_users(self) -> list[User]:
+        """Return users that opted into dashboard display."""
+        return [user for user in self.list_users() if not user.hidden]
 
     def rename_user(self, user_id: int, new_name: str) -> User:
         """Rename an existing user."""
@@ -305,6 +339,20 @@ class Database:
         user = self.get_user(user_id)
         if user is None:
             raise RuntimeError("recolored user could not be read back")
+        return user
+
+    def set_user_hidden(self, user_id: int, hidden: bool) -> User:
+        """Set whether a user is omitted from dashboard-only views."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET hidden = ? WHERE id = ?",
+                (int(bool(hidden)), user_id),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(f"unknown user id {user_id}")
+        user = self.get_user(user_id)
+        if user is None:
+            raise RuntimeError("updated user could not be read back")
         return user
 
     def delete_user(self, user_id: int) -> None:
@@ -503,7 +551,17 @@ def _row_to_measurement(row: tuple[object, ...]) -> Measurement:
 
 
 def _row_to_user(row: tuple[object, ...]) -> User:
-    user_id, name, color, created_ts, mu_kg, sigma_kg, last_seen_ts, weigh_count = row
+    (
+        user_id,
+        name,
+        color,
+        created_ts,
+        mu_kg,
+        sigma_kg,
+        last_seen_ts,
+        weigh_count,
+        hidden,
+    ) = row
     return User(
         id=int(user_id),
         name=str(name),
@@ -513,4 +571,5 @@ def _row_to_user(row: tuple[object, ...]) -> User:
         sigma_kg=float(sigma_kg) if sigma_kg is not None else None,
         last_seen_ts=str(last_seen_ts) if last_seen_ts is not None else None,
         weigh_count=int(weigh_count),
+        hidden=bool(hidden),
     )

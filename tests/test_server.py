@@ -75,6 +75,9 @@ def test_flask_user_recognition_claim_unassign_chart_and_apis(tmp_path):
     assert b'class="rename-fallback"' in user_page.data
     assert f'action="/users/{alice.id}/rename"'.encode() in user_page.data
     assert b">Rename</button>" in user_page.data
+    assert f'action="/users/{alice.id}/hidden"'.encode() in user_page.data
+    assert b"Hide from dashboard" in user_page.data
+    assert b'getElementById("hidden-user-toggle")' in user_page.data
 
     expected_color = color_from_key(str(reroll_timestamp))
     assert expected_color != user_color("Alice")
@@ -117,7 +120,15 @@ def test_flask_user_recognition_claim_unassign_chart_and_apis(tmp_path):
 
     users_json = client.get("/api/users").get_json()
     assert isinstance(users_json, list)
-    assert {"id", "name", "color", "mu_kg", "sigma_kg", "weigh_count"} <= set(
+    assert {
+        "id",
+        "name",
+        "color",
+        "mu_kg",
+        "sigma_kg",
+        "weigh_count",
+        "hidden",
+    } <= set(
         users_json[0]
     )
     measurements_json = client.get(
@@ -186,6 +197,56 @@ def test_user_rename_route_json_form_and_failures(tmp_path):
         "id": alice.id,
         "name": "A. Smith",
     }
+
+
+def test_hidden_user_dashboard_toggle_api_and_recognition_semantics(tmp_path):
+    app = create_app(str(tmp_path / "hidden.sqlite3"))
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    extension = app.extensions["wiifat"]
+    database = extension["database"]
+    start = 1_700_000_000.0
+    visible = database.create_user("Visible", 65.0, timestamp=start)
+    hidden = database.create_user("Hidden", 82.0, timestamp=start)
+    hidden = database.set_user_hidden(hidden.id, True)
+
+    assigned_id, result = extension["inject_measurement"](
+        measurement(start + DAY, 82.1)
+    )
+    assert result.assigned_user_id == hidden.id
+    assert database.fetch_measurement(assigned_id).user_id == hidden.id
+    database.insert(measurement(start + 2 * DAY, 110.0))
+
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    assert f'href="/user/{visible.id}"'.encode() in dashboard.data
+    assert f'href="/user/{hidden.id}"'.encode() not in dashboard.data
+    assert f'name="user_id" value="{hidden.id}"'.encode() not in dashboard.data
+    hidden_badge = (
+        f'<span class="badge" style="background: {hidden.color}">Hidden</span>'
+    ).encode()
+    assert hidden_badge in dashboard.data
+
+    user_page = client.get(f"/user/{hidden.id}")
+    assert user_page.status_code == 200
+    assert b'name="hidden" value="1" checked' in user_page.data
+
+    users_json = client.get("/api/users").get_json()
+    hidden_json = next(item for item in users_json if item["id"] == hidden.id)
+    assert hidden_json["hidden"] is True
+
+    response = client.post(f"/users/{hidden.id}/hidden", data={})
+    assert response.status_code == 302
+    assert response.location.endswith(f"/user/{hidden.id}")
+    assert database.get_user(hidden.id).hidden is False
+
+    response = client.post(
+        f"/users/{hidden.id}/hidden", data={"hidden": "1"}
+    )
+    assert response.status_code == 302
+    assert database.get_user(hidden.id).hidden is True
+
+    assert client.post("/users/9999/hidden", data={"hidden": "1"}).status_code == 404
 
 
 def test_sse_measurement_event_contains_recognition_and_stored_color(tmp_path):

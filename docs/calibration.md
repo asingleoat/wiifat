@@ -133,7 +133,7 @@ For each cell lacking an empty anchor, collect the base-coefficient rows
 $A_{p\cdot}$ of all usable captures in which that cell is unclamped. The
 offset is identifiable iff
 
-$$\operatorname{rank}([A \mid \mathbf{1}]) > \operatorname{rank}(A).$$
+$$\mathrm{rank}([A \mid \mathbf{1}]) > \mathrm{rank}(A).$$
 
 The all-ones column is the per-capture $\delta$; identifiability means it
 is not expressible as a combination of object-mass columns. Fully known

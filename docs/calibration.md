@@ -9,7 +9,7 @@ using one precisely known small mass and unweighed auxiliary objects.
 
 Each load cell $i$ reports
 
-$$m_i = \max(g_i\,l_i + o_i,\ 0)$$
+$$m_i = \max(g_i l_i + o_i, 0)$$
 
 - $l_i \ge 0$: true incremental load on cell $i$ (above the empty-board
   state; the platform's own weight is absorbed into $o_i$),
@@ -89,9 +89,9 @@ required, only that the additions concentrate load differently.
 
 If all loaded captures share a single known total $W$, the family
 
-$$g_i' = s\,g_i,\qquad
+$$g_i' = s g_i,\qquad
   o_c' = o_c + g_c W (1-s),\qquad
-  l_i' = l_i/s \ (i \ne c),\qquad
+  l_i' = l_i/s \quad (i \ne c),\qquad
   l_c' = l_c/s + W(1 - 1/s)$$
 
 (where $c$ is a cell with no empty anchor) reproduces every reading and
@@ -110,7 +110,7 @@ precision, not identifiability.
 
 With $s$ fixed, a cell $c$ lacking an empty anchor still admits
 
-$$o_c' = o_c + \delta,\qquad X_b' = X_b - \delta/g_c \ \ \forall b,$$
+$$o_c' = o_c + \delta,\qquad X_b' = X_b - \delta/g_c \quad \forall b,$$
 
 because $\delta$ enters once per capture (through cell $c$) and each
 unknown base absorbs it. No collection of unknown-base captures
@@ -120,7 +120,7 @@ Closure breaks it. For two unweighed objects $A$, $B$ weighed separately
 and together, with per-weighing zero error $z$:
 
 $$a = A + z,\quad b = B + z,\quad c = A + B + z
-\;\Rightarrow\; z = a + b - c.$$
+\quad\Rightarrow\quad z = a + b - c.$$
 
 The zero error is counted once per weighing, object masses once per
 object; three captures, three unknowns ($A$, $B$, $z$), exactly
@@ -172,12 +172,12 @@ must remain unmodified across their captures.
 
 Unknowns: $g_i$, $o_i$ ($i = 1..n$), base masses $X_b$, and latent loads
 $l_{ip} \ge 0$ per usable capture. Usable = all cells unclamped
-($m_i > 0\ \forall i$); captures containing any clamped cell are excluded
+($m_i > 0$ for all $i$); captures containing any clamped cell are excluded
 from the fit (censored values carry only inequality information, which is
 not used). Objective: least squares over all usable readings,
 
 $$\min \sum_{p,i} \big(m_{ip} - g_i l_{ip} - o_i\big)^2
-\quad\text{s.t.}\quad \sum_i l_{ip} = T_p(X),\ \ l_{ip} \ge 0.$$
+\quad\text{s.t.}\quad \sum_i l_{ip} = T_p(X),\quad l_{ip} \ge 0.$$
 
 ### 4.2 Alternating least squares
 

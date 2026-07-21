@@ -121,6 +121,8 @@ _DASHBOARD = """
   <div id="live-battery" class="muted">{% if status.battery_pct is not none %}Battery {{ status.battery_pct }}%{% endif %}</div>
 </div>
 
+<img class="chart" src="{{ url_for('chart_all') }}" alt="Weight chart">
+
 <h2>Users</h2>
 <form method="post" action="{{ url_for('create_user_route') }}">
   <input name="name" required placeholder="Name">
@@ -159,7 +161,6 @@ _DASHBOARD = """
 <td>{{ item.assign_method or '—' }}{% if item.assign_confidence is not none %} {{ '%.1f%%'|format(100 * item.assign_confidence) }}{% endif %}
 {% if item.user_id %}<form class="inline" method="post" action="{{ url_for('unassign_route') }}"><input type="hidden" name="measurement_id" value="{{ item.id }}"><button type="submit">Unassign</button></form>{% endif %}</td>
 </tr>{% else %}<tr><td colspan="4">No measurements yet.</td></tr>{% endfor %}</table>
-<img class="chart" src="{{ url_for('chart_all') }}" alt="Weight chart">
 <script>
 (() => {
   const message = document.getElementById("live-message");

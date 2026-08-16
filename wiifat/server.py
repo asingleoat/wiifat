@@ -21,9 +21,7 @@ from .colors import UNASSIGNED_COLOR, color_from_key
 from .db import Database, DuplicateUserNameError, User, format_timestamp
 from .recognize import RecognitionResult, UserModel, recognize, replay_belief
 from .statemachine import Measurement
-
-
-POUNDS_PER_KG = 2.2046226218
+from .units import POUNDS_PER_KG
 
 
 @dataclass
@@ -136,8 +134,8 @@ _DASHBOARD = """
     <form class="inline" method="post" action="{{ url_for('reroll_user_color_route', user_id=summary.user.id) }}"><button class="small" type="submit">reroll color</button></form></td>
   <td>{{ summary.latest.weight_kg|weight if summary.latest else '—' }}</td>
   <td>{{ summary.count }}</td>
-  <td>{% if summary.user.mu_kg is not none %}μ {{ '%.2f'|format(summary.user.mu_kg) }} kg,
-      σ {{ '%.2f'|format(summary.user.sigma_kg) }} kg{% else %}unseeded{% endif %}</td>
+  <td>{% if summary.user.mu_kg is not none %}μ {{ summary.user.mu_kg|weight }},
+      σ {{ summary.user.sigma_kg|weight }}{% else %}unseeded{% endif %}</td>
 </tr>{% else %}<tr><td colspan="4">No users yet.</td></tr>{% endfor %}</table>
 
 <h2>Unclaimed</h2>
@@ -267,12 +265,13 @@ _USER_PAGE = """
   <button type="submit">Save</button>
 </form>
 <p>{{ history|length }} assigned measurements. Model:
-{% if user.mu_kg is not none %}μ {{ '%.2f'|format(user.mu_kg) }} kg,
-σ {{ '%.2f'|format(user.sigma_kg) }} kg{% else %}unseeded{% endif %}.</p>
+{% if user.mu_kg is not none %}μ {{ user.mu_kg|weight }},
+σ {{ user.sigma_kg|weight }}{% else %}unseeded{% endif %}.</p>
 <img class="chart" src="{{ url_for('chart_user', user_id=user.id) }}" alt="{{ user.name }} chart">
 <h2>Add historical entry</h2>
 <form method="post" action="{{ url_for('add_manual_measurement_route', user_id=user.id) }}">
-  <label>Weight (kg) <input name="weight" type="number" min="0.01" step="0.01" required></label>
+  <label>Weight <input name="weight" type="number" min="0.01" step="0.01" required></label>
+  <label>Unit <select name="unit"><option value="kg">kg</option><option value="lb">lb</option></select></label>
   <label>Date <input name="date" type="date" required></label>
   <label>Time <input name="time" type="time"></label>
   <button type="submit">Add entry</button>
@@ -653,7 +652,12 @@ def create_app(
         if database.get_user(user_id) is None:
             abort(404)
         try:
+            unit = request.form.get("unit", "kg").strip() or "kg"
+            if unit not in ("kg", "lb"):
+                raise ValueError("unit must be kg or lb")
             weight_kg = float(request.form.get("weight", ""))
+            if unit == "lb":
+                weight_kg /= POUNDS_PER_KG
             if not math.isfinite(weight_kg) or weight_kg <= 0.0:
                 raise ValueError("weight must be finite and positive")
             entry_date = datetime.strptime(

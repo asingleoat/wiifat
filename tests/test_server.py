@@ -14,6 +14,7 @@ from wiifat.db import Database, format_timestamp  # noqa: E402
 from wiifat.recognize import UserModel, replay_belief  # noqa: E402
 from wiifat.server import EventPublisher, create_app  # noqa: E402
 from wiifat.statemachine import Measurement  # noqa: E402
+from wiifat.units import POUNDS_PER_KG  # noqa: E402
 
 
 DAY = 86_400.0
@@ -274,7 +275,14 @@ def test_manual_measurement_route_renders_entry_and_replays_belief(tmp_path):
     assert b'name="weight" type="number" min="0.01" step="0.01" required' in user_page.data
     assert b'name="date" type="date" required' in user_page.data
     assert b'name="time" type="time"' in user_page.data
+    assert b'name="unit"' in user_page.data
+    assert b'<option value="lb">lb</option>' in user_page.data
     assert b"71.25 kg / 157.1 lb" in user_page.data
+    assert "μ 71.25 kg / 157.1 lb".encode() in user_page.data
+    assert "σ 2.00 kg / 4.4 lb".encode() in user_page.data
+
+    dashboard = client.get("/")
+    assert "σ 2.00 kg / 4.4 lb".encode() in dashboard.data
     assert f'action="/measurements/{stored[0].id}/delete"'.encode() in user_page.data
     assert b">Delete</button>" in user_page.data
     assert b">Unassign</button>" not in user_page.data
@@ -303,6 +311,7 @@ def test_manual_measurement_route_validation_and_unknown_user(tmp_path):
         {**valid, "date": "not-a-date"},
         {**valid, "date": (today + timedelta(days=1)).isoformat()},
         {**valid, "time": "25:00"},
+        {**valid, "unit": "stone"},
     ]
     for form in invalid_forms:
         response = client.post(f"/user/{user.id}/measurements", data=form)
@@ -311,6 +320,34 @@ def test_manual_measurement_route_validation_and_unknown_user(tmp_path):
     response = client.post("/user/9999/measurements", data=valid)
     assert response.status_code == 404
     assert database.fetch_for_user(user.id) == []
+
+
+def test_manual_measurement_accepts_pounds(tmp_path):
+    now = 1_700_000_000.0
+    app = create_app(str(tmp_path / "manual-lb.sqlite3"), time_fn=lambda: now)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    database = app.extensions["wiifat"]["database"]
+    user = database.create_user("Alice", timestamp=now)
+    entry_date = datetime.fromtimestamp(now).date() - timedelta(days=1)
+
+    response = client.post(
+        f"/user/{user.id}/measurements",
+        data={
+            "weight": "154.5",
+            "unit": "lb",
+            "date": entry_date.isoformat(),
+            "time": "08:00",
+        },
+    )
+
+    assert response.status_code == 302
+    stored = database.fetch_for_user(user.id)
+    assert len(stored) == 1
+    assert stored[0].weight_kg == pytest.approx(154.5 / POUNDS_PER_KG)
+    assert database.get_user(user.id).mu_kg == pytest.approx(
+        154.5 / POUNDS_PER_KG
+    )
 
 
 def test_manual_measurement_local_times_and_delete_route(tmp_path):

@@ -17,6 +17,7 @@ from matplotlib import pyplot as plt  # noqa: E402
 
 from .colors import UNASSIGNED_COLOR
 from .db import Database
+from .units import POUNDS_PER_KG
 
 
 TREND_TAU_DAYS = 10.0
@@ -123,6 +124,20 @@ def render_chart_png(
     user_id: int | None = None,
 ) -> bytes:
     """Render a general or per-user history chart as PNG bytes."""
+    figure = render_chart_figure(db_path, days, user_id=user_id)
+    output = BytesIO()
+    figure.savefig(output, format="png", dpi=140)
+    plt.close(figure)
+    return output.getvalue()
+
+
+def render_chart_figure(
+    db_path: str | os.PathLike[str] | None = None,
+    days: int | None = None,
+    *,
+    user_id: int | None = None,
+):
+    """Build a history chart figure; the caller owns closing it."""
     if days is not None and days < 0:
         raise ValueError("days must be nonnegative")
 
@@ -184,12 +199,12 @@ def render_chart_png(
     if handles:
         axis.legend(handles, labels)
     figure.autofmt_xdate()
+    pounds_axis = axis.twinx()
+    low, high = axis.get_ylim()
+    pounds_axis.set_ylim(low * POUNDS_PER_KG, high * POUNDS_PER_KG)
+    pounds_axis.set_ylabel("Weight (lb)")
     figure.tight_layout()
-
-    output = BytesIO()
-    figure.savefig(output, format="png", dpi=140)
-    plt.close(figure)
-    return output.getvalue()
+    return figure
 
 
 def _plot_user(

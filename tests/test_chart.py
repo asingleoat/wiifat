@@ -8,8 +8,10 @@ from wiifat.chart import (
     TREND_TAU_DAYS,
     ewma_trend,
     render_chart,
+    render_chart_figure,
     trend_slope_kg_per_week,
 )
+from wiifat.units import POUNDS_PER_KG
 from wiifat.colors import color_from_key, user_color
 from wiifat.db import Database
 from wiifat.statemachine import Measurement
@@ -36,6 +38,20 @@ def test_trend_slope_recovers_linear_drift():
     assert trend_slope_kg_per_week(trend) == pytest.approx(0.7)
     assert trend_slope_kg_per_week(trend[:1]) is None
     assert trend_slope_kg_per_week([(0.0, 70.0), (DAY, 70.2)]) is None
+
+
+def test_chart_has_synced_pounds_axis(tmp_path):
+    figure = render_chart_figure(tmp_path / "empty.sqlite3")
+    try:
+        kg_axis, pounds_axis = figure.axes
+        low, high = kg_axis.get_ylim()
+        assert kg_axis.get_ylabel() == "Weight (kg)"
+        assert pounds_axis.get_ylabel() == "Weight (lb)"
+        assert pounds_axis.get_ylim() == pytest.approx(
+            (low * POUNDS_PER_KG, high * POUNDS_PER_KG)
+        )
+    finally:
+        chart_module.plt.close(figure)
 
 
 def test_chart_smoke(tmp_path, monkeypatch):

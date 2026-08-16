@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import queue
 import sqlite3
 import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time as datetime_time, timezone
 from typing import Callable
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, url_for
@@ -18,7 +19,7 @@ from flask import Flask, Response, abort, jsonify, redirect, render_template_str
 from . import chart, scale
 from .colors import UNASSIGNED_COLOR, color_from_key
 from .db import Database, DuplicateUserNameError, User, format_timestamp
-from .recognize import RecognitionResult, UserModel, recognize, update_belief
+from .recognize import RecognitionResult, UserModel, recognize, replay_belief
 from .statemachine import Measurement
 
 
@@ -269,9 +270,16 @@ _USER_PAGE = """
 {% if user.mu_kg is not none %}μ {{ '%.2f'|format(user.mu_kg) }} kg,
 σ {{ '%.2f'|format(user.sigma_kg) }} kg{% else %}unseeded{% endif %}.</p>
 <img class="chart" src="{{ url_for('chart_user', user_id=user.id) }}" alt="{{ user.name }} chart">
+<h2>Add historical entry</h2>
+<form method="post" action="{{ url_for('add_manual_measurement_route', user_id=user.id) }}">
+  <label>Weight (kg) <input name="weight" type="number" min="0.01" step="0.01" required></label>
+  <label>Date <input name="date" type="date" required></label>
+  <label>Time <input name="time" type="time"></label>
+  <button type="submit">Add entry</button>
+</form>
 <table><tr><th>Time</th><th>Weight</th><th>Method</th><th></th></tr>
 {% for item in history %}<tr><td>{{ item.timestamp|timestamp }}</td><td>{{ item.weight_kg|weight }}</td>
-<td>{{ item.assign_method or '—' }}</td><td><form method="post" action="{{ url_for('unassign_route') }}"><input type="hidden" name="measurement_id" value="{{ item.id }}"><button>Unassign</button></form></td></tr>
+<td>{{ item.assign_method or '—' }}</td><td>{% if item.source == 'manual' %}<form class="inline" method="post" action="{{ url_for('delete_manual_measurement_route', measurement_id=item.id) }}"><button type="submit">Delete</button></form>{% else %}<form method="post" action="{{ url_for('unassign_route') }}"><input type="hidden" name="measurement_id" value="{{ item.id }}"><button>Unassign</button></form>{% endif %}</td></tr>
 {% endfor %}</table>
 {{ rename_script|safe }}
 <script>
@@ -436,9 +444,9 @@ def create_app(
                 method="auto",
                 confidence=result.confidence,
             )
-            user = database.get_user(result.assigned_user_id)
-            if user is not None:
-                assigned_user = _update_stored_belief(database, user, measurement)
+            assigned_user = _rebuild_stored_belief(
+                database, result.assigned_user_id
+            )
         with status_lock:
             status.battery_pct = measurement.battery_pct
         publisher.publish("status", status_payload())
@@ -585,6 +593,9 @@ def create_app(
             )
             if measurement_text and measurement is None:
                 raise KeyError("unknown measurement")
+            previous_user_id = (
+                measurement.user_id if measurement is not None else None
+            )
             user = database.create_user(
                 request.form.get("name", ""),
                 None if measurement_text else seed,
@@ -593,7 +604,9 @@ def create_app(
                 database.assign_measurement(
                     measurement.id, user.id, method="manual", confidence=None
                 )
-                _update_stored_belief(database, user, measurement)
+                if previous_user_id is not None:
+                    _rebuild_stored_belief(database, previous_user_id)
+                _rebuild_stored_belief(database, user.id)
         except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
             abort(400, str(exc))
         return redirect(url_for("dashboard"))
@@ -635,6 +648,56 @@ def create_app(
             abort(404)
         return redirect(url_for("user_page", user_id=user_id))
 
+    @app.post("/user/<int:user_id>/measurements")
+    def add_manual_measurement_route(user_id: int) -> Response:
+        if database.get_user(user_id) is None:
+            abort(404)
+        try:
+            weight_kg = float(request.form.get("weight", ""))
+            if not math.isfinite(weight_kg) or weight_kg <= 0.0:
+                raise ValueError("weight must be finite and positive")
+            entry_date = datetime.strptime(
+                request.form.get("date", ""), "%Y-%m-%d"
+            ).date()
+            time_text = request.form.get("time", "").strip()
+            entry_time = (
+                datetime.strptime(time_text, "%H:%M").time()
+                if time_text
+                else datetime_time(12, 0)
+            )
+            today = datetime.fromtimestamp(time_fn()).date()
+            if entry_date > today:
+                raise ValueError("date must not be in the future")
+            timestamp = (
+                datetime.combine(entry_date, entry_time)
+                .astimezone(timezone.utc)
+                .timestamp()
+            )
+            database.insert_manual(user_id, weight_kg, timestamp)
+            _rebuild_stored_belief(database, user_id)
+        except KeyError:
+            abort(404)
+        except (OverflowError, ValueError) as exc:
+            abort(400, str(exc))
+        return redirect(url_for("user_page", user_id=user_id))
+
+    @app.post("/measurements/<int:measurement_id>/delete")
+    def delete_manual_measurement_route(measurement_id: int) -> Response:
+        try:
+            measurement = database.fetch_measurement(measurement_id)
+            if measurement is None:
+                raise KeyError(f"unknown measurement id {measurement_id}")
+            database.delete_manual_measurement(
+                measurement_id, timestamp=time_fn()
+            )
+            if measurement.user_id is not None:
+                _rebuild_stored_belief(database, measurement.user_id)
+        except KeyError:
+            abort(404)
+        except ValueError as exc:
+            abort(400, str(exc))
+        return redirect(request.referrer or url_for("dashboard"))
+
     @app.post("/assign")
     def assign_route() -> Response:
         try:
@@ -647,7 +710,9 @@ def create_app(
             database.assign_measurement(
                 measurement_id, user_id, method="manual", confidence=None
             )
-            _update_stored_belief(database, user, measurement)
+            if measurement.user_id is not None and measurement.user_id != user.id:
+                _rebuild_stored_belief(database, measurement.user_id)
+            _rebuild_stored_belief(database, user.id)
         except (KeyError, ValueError) as exc:
             abort(400, str(exc))
         return redirect(request.referrer or url_for("dashboard"))
@@ -655,7 +720,13 @@ def create_app(
     @app.post("/unassign")
     def unassign_route() -> Response:
         try:
-            database.unassign_measurement(int(request.form["measurement_id"]))
+            measurement_id = int(request.form["measurement_id"])
+            measurement = database.fetch_measurement(measurement_id)
+            if measurement is None:
+                raise KeyError(f"unknown measurement id {measurement_id}")
+            database.unassign_measurement(measurement_id)
+            if measurement.user_id is not None:
+                _rebuild_stored_belief(database, measurement.user_id)
         except (KeyError, ValueError) as exc:
             abort(400, str(exc))
         return redirect(request.referrer or url_for("dashboard"))
@@ -758,17 +829,26 @@ def _user_model(user: User) -> UserModel:
     )
 
 
-def _update_stored_belief(
-    database: Database, user: User, measurement: Measurement
-) -> User:
-    updated = update_belief(
-        _user_model(user), measurement.weight_kg, measurement.timestamp
+def _rebuild_stored_belief(database: Database, user_id: int) -> User:
+    user = database.get_user(user_id)
+    if user is None:
+        raise KeyError(f"unknown user id {user_id}")
+    updated = replay_belief(
+        _user_model(user),
+        (
+            (measurement.weight_kg, measurement.timestamp)
+            for measurement in database.fetch_for_user(user_id)
+        ),
     )
     return database.update_user_model(
-        user.id,
+        user_id,
         mu_kg=updated.mu_kg,
         sigma_kg=updated.sigma_kg,
-        last_seen_ts=format_timestamp(measurement.timestamp),
+        last_seen_ts=(
+            format_timestamp(updated.last_seen_ts)
+            if updated.last_seen_ts is not None
+            else None
+        ),
         weigh_count=updated.weigh_count,
     )
 
@@ -784,6 +864,7 @@ def _measurement_json(item: Measurement) -> dict[str, object]:
         "user_id": item.user_id,
         "assign_method": item.assign_method,
         "assign_confidence": item.assign_confidence,
+        "source": item.source,
     }
 
 

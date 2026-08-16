@@ -30,6 +30,7 @@ class Measurement:
     user_id: int | None = None
     assign_method: str | None = None
     assign_confidence: float | None = None
+    source: str | None = None
 
     @property
     def ts(self) -> float:

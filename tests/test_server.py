@@ -1,6 +1,7 @@
 import json
+import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, time as datetime_time, timedelta, timezone
 
 import pytest
 
@@ -9,7 +10,8 @@ pytest.importorskip("flask")
 
 from wiifat.calibration import CORNERS  # noqa: E402
 from wiifat.colors import color_from_key, user_color  # noqa: E402
-from wiifat.db import Database  # noqa: E402
+from wiifat.db import Database, format_timestamp  # noqa: E402
+from wiifat.recognize import UserModel, replay_belief  # noqa: E402
 from wiifat.server import EventPublisher, create_app  # noqa: E402
 from wiifat.statemachine import Measurement  # noqa: E402
 
@@ -27,6 +29,33 @@ def measurement(timestamp, weight):
         duration_s=3.0,
         battery_pct=80,
     )
+
+
+def expected_replay(database, user):
+    return replay_belief(
+        UserModel(user.id, user.name, None, None, None, 0),
+        (
+            (item.weight_kg, item.timestamp)
+            for item in database.fetch_for_user(user.id)
+        ),
+    )
+
+
+def assert_stored_belief(database, user_id, expected):
+    stored = database.get_user(user_id)
+    assert stored is not None
+    if expected.mu_kg is None:
+        assert stored.mu_kg is None
+        assert stored.sigma_kg is None
+        assert stored.last_seen_ts is None
+    else:
+        assert expected.sigma_kg is not None
+        assert expected.last_seen_ts is not None
+        assert stored.mu_kg == pytest.approx(expected.mu_kg)
+        assert stored.sigma_kg == pytest.approx(expected.sigma_kg)
+        assert stored.last_seen_ts == format_timestamp(expected.last_seen_ts)
+    assert stored.weigh_count == expected.weigh_count
+    return stored
 
 
 def test_flask_user_recognition_claim_unassign_chart_and_apis(tmp_path):
@@ -115,6 +144,9 @@ def test_flask_user_recognition_claim_unassign_chart_and_apis(tmp_path):
     response = client.post("/unassign", data={"measurement_id": visitor_id})
     assert response.status_code == 302
     assert database.fetch_measurement(visitor_id).user_id is None
+    assert_stored_belief(
+        database, bob.id, UserModel(bob.id, bob.name, None, None, None, 0)
+    )
 
     chart = client.get(f"/chart/{alice.id}.png")
     assert chart.status_code == 200
@@ -199,6 +231,184 @@ def test_user_rename_route_json_form_and_failures(tmp_path):
         "id": alice.id,
         "name": "A. Smith",
     }
+
+
+def test_manual_measurement_route_renders_entry_and_replays_belief(tmp_path):
+    now = 1_700_000_000.0
+    app = create_app(str(tmp_path / "manual.sqlite3"), time_fn=lambda: now)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    extension = app.extensions["wiifat"]
+    database = extension["database"]
+    user = database.create_user("Alice", 70.0, timestamp=now - DAY)
+    belief_before = database.get_user(user.id)
+    subscriber = extension["publisher"].subscribe()
+    entry_date = datetime.fromtimestamp(now).date()
+
+    response = client.post(
+        f"/user/{user.id}/measurements",
+        data={"weight": "71.25", "date": entry_date.isoformat(), "time": "08:30"},
+    )
+
+    assert response.status_code == 302
+    assert response.location.endswith(f"/user/{user.id}")
+    stored = database.fetch_for_user(user.id)
+    assert len(stored) == 1
+    assert stored[0].weight_kg == pytest.approx(71.25)
+    assert stored[0].assign_method == "entered"
+    assert stored[0].source == "manual"
+    expected = expected_replay(database, user)
+    belief_after = assert_stored_belief(database, user.id, expected)
+    assert belief_after != belief_before
+    assert belief_after.mu_kg == pytest.approx(71.25)
+    assert belief_after.sigma_kg == pytest.approx(2.0)
+    assert belief_after.weigh_count == 1
+    assert belief_after.last_seen_ts == format_timestamp(stored[0].timestamp)
+    assert subscriber.empty()
+    extension["publisher"].unsubscribe(subscriber)
+
+    user_page = client.get(f"/user/{user.id}")
+    assert user_page.status_code == 200
+    assert b"Add historical entry" in user_page.data
+    assert f'action="/user/{user.id}/measurements"'.encode() in user_page.data
+    assert b'name="weight" type="number" min="0.01" step="0.01" required' in user_page.data
+    assert b'name="date" type="date" required' in user_page.data
+    assert b'name="time" type="time"' in user_page.data
+    assert b"71.25 kg / 157.1 lb" in user_page.data
+    assert f'action="/measurements/{stored[0].id}/delete"'.encode() in user_page.data
+    assert b">Delete</button>" in user_page.data
+    assert b">Unassign</button>" not in user_page.data
+
+    measurements_json = client.get(
+        f"/api/measurements?user={user.id}"
+    ).get_json()
+    assert measurements_json[0]["source"] == "manual"
+
+
+def test_manual_measurement_route_validation_and_unknown_user(tmp_path):
+    now = 1_700_000_000.0
+    app = create_app(str(tmp_path / "manual-validation.sqlite3"), time_fn=lambda: now)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    database = app.extensions["wiifat"]["database"]
+    user = database.create_user("Alice", timestamp=now)
+    today = datetime.fromtimestamp(now).date()
+    valid = {"weight": "70.0", "date": today.isoformat(), "time": "09:15"}
+
+    invalid_forms = [
+        {**valid, "weight": "not-a-weight"},
+        {**valid, "weight": "0"},
+        {**valid, "weight": "nan"},
+        {**valid, "weight": "inf"},
+        {**valid, "date": "not-a-date"},
+        {**valid, "date": (today + timedelta(days=1)).isoformat()},
+        {**valid, "time": "25:00"},
+    ]
+    for form in invalid_forms:
+        response = client.post(f"/user/{user.id}/measurements", data=form)
+        assert response.status_code == 400
+
+    response = client.post("/user/9999/measurements", data=valid)
+    assert response.status_code == 404
+    assert database.fetch_for_user(user.id) == []
+
+
+def test_manual_measurement_local_times_and_delete_route(tmp_path):
+    now = 1_700_000_000.0
+    app = create_app(str(tmp_path / "manual-delete.sqlite3"), time_fn=lambda: now)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    database = app.extensions["wiifat"]["database"]
+    user = database.create_user("Alice", timestamp=now)
+    recent_date = datetime.fromtimestamp(now).date() - timedelta(days=1)
+    backfill_date = recent_date - timedelta(days=1)
+
+    explicit_response = client.post(
+        f"/user/{user.id}/measurements",
+        data={
+            "weight": "70.20",
+            "date": recent_date.isoformat(),
+            "time": "07:45",
+        },
+    )
+    assert explicit_response.status_code == 302
+    belief_before_backfill = database.get_user(user.id)
+
+    noon_response = client.post(
+        f"/user/{user.id}/measurements",
+        data={"weight": "70.10", "date": backfill_date.isoformat(), "time": ""},
+    )
+    assert noon_response.status_code == 302
+
+    history = database.fetch_for_user(user.id)
+    noon = next(item for item in history if item.weight_kg == pytest.approx(70.10))
+    explicit = next(item for item in history if item.weight_kg == pytest.approx(70.20))
+    expected_noon = (
+        datetime.combine(backfill_date, datetime_time(12, 0))
+        .astimezone(timezone.utc)
+        .timestamp()
+    )
+    expected_explicit = (
+        datetime.combine(recent_date, datetime_time(7, 45))
+        .astimezone(timezone.utc)
+        .timestamp()
+    )
+    assert noon.timestamp == pytest.approx(expected_noon)
+    assert explicit.timestamp == pytest.approx(expected_explicit)
+    assert [item.id for item in history] == [noon.id, explicit.id]
+    replayed = assert_stored_belief(
+        database, user.id, expected_replay(database, user)
+    )
+    assert replayed.weigh_count == 2
+
+    board_id = database.insert(measurement(now - 100.0, 70.3))
+    delete_response = client.post(
+        f"/measurements/{noon.id}/delete",
+        headers={"Referer": f"http://localhost/user/{user.id}"},
+    )
+    assert delete_response.status_code == 302
+    assert delete_response.location.endswith(f"/user/{user.id}")
+    assert database.fetch_measurement(noon.id) is None
+    assert database.get_user(user.id) == belief_before_backfill
+
+    connection = sqlite3.connect(database.path)
+    raw_deleted_ts = connection.execute(
+        "SELECT deleted_ts FROM measurements WHERE id = ?", (noon.id,)
+    ).fetchone()
+    connection.close()
+    assert raw_deleted_ts == (format_timestamp(now),)
+    assert client.post(f"/measurements/{noon.id}/delete").status_code == 404
+
+    user_page = client.get(f"/user/{user.id}")
+    assert b"70.10 kg" not in user_page.data
+    api_rows = client.get(f"/api/measurements?user={user.id}").get_json()
+    assert [item["id"] for item in api_rows] == [explicit.id]
+    chart = client.get(f"/chart/{user.id}.png")
+    assert chart.status_code == 200
+    assert chart.data.startswith(b"\x89PNG\r\n\x1a\n")
+
+    assign_response = client.post(
+        "/assign", data={"measurement_id": board_id, "user_id": user.id}
+    )
+    assert assign_response.status_code == 302
+    assert database.get_user(user.id).weigh_count == 2
+    unassign_response = client.post(
+        "/unassign", data={"measurement_id": board_id}
+    )
+    assert unassign_response.status_code == 302
+    assert database.get_user(user.id) == belief_before_backfill
+
+    only_observation_response = client.post(
+        "/unassign", data={"measurement_id": explicit.id}
+    )
+    assert only_observation_response.status_code == 302
+    assert_stored_belief(
+        database, user.id, UserModel(user.id, user.name, None, None, None, 0)
+    )
+
+    assert client.post(f"/measurements/{board_id}/delete").status_code == 400
+    assert database.fetch_measurement(board_id) is not None
+    assert client.post("/measurements/9999/delete").status_code == 404
 
 
 def test_hidden_user_dashboard_toggle_api_and_recognition_semantics(tmp_path):

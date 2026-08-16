@@ -1,13 +1,13 @@
-"""Pure Bayesian recognition and sequential user-weight belief updates.
+"""Pure Bayesian recognition and replayable user-weight belief fitting.
 
-Assignments update a user's belief immediately. Reassigning or unassigning a
-measurement does not undo an earlier belief update; that is an intentional POC
-limitation and should be replaced by replayable model fitting in a mature app.
+Stored beliefs are rebuilt by replaying each user's live assigned observations
+in ascending time order, so assignment and tombstone changes are retractable.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 
@@ -150,6 +150,18 @@ def update_belief(
         last_seen_ts=timestamp,
         weigh_count=user.weigh_count + 1,
     )
+
+
+def replay_belief(
+    user: UserModel,
+    observations: Iterable[tuple[float, float]],
+    params: RecognitionParams = RecognitionParams(),
+) -> UserModel:
+    """Refit a user's belief from ascending ``(weight_kg, timestamp)`` pairs."""
+    replayed = UserModel(user.id, user.name, None, None, None, 0)
+    for weight_kg, timestamp in observations:
+        replayed = update_belief(replayed, weight_kg, timestamp, params)
+    return replayed
 
 
 def _days_since(last_seen_ts: float | None, timestamp: float) -> float:

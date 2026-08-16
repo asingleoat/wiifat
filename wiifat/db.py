@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -43,7 +44,9 @@ CREATE TABLE IF NOT EXISTS measurements(
     battery_pct INTEGER,
     user_id INTEGER,
     assign_method TEXT,
-    assign_confidence REAL
+    assign_confidence REAL,
+    source TEXT,
+    deleted_ts TEXT
 )
 """
 
@@ -54,17 +57,20 @@ _MIGRATIONS = {
     "user_id": "ALTER TABLE measurements ADD COLUMN user_id INTEGER",
     "assign_method": "ALTER TABLE measurements ADD COLUMN assign_method TEXT",
     "assign_confidence": "ALTER TABLE measurements ADD COLUMN assign_confidence REAL",
+    "source": "ALTER TABLE measurements ADD COLUMN source TEXT",
+    "deleted_ts": "ALTER TABLE measurements ADD COLUMN deleted_ts TEXT",
 }
 
 _MEASUREMENT_COLUMNS = """
     id, ts, weight_kg, stdev_kg, tare_kg, corners_json, duration_s,
-    raw_kg, cal_json, battery_pct, user_id, assign_method, assign_confidence
+    raw_kg, cal_json, battery_pct, user_id, assign_method, assign_confidence,
+    source
 """
 
 _JOINED_MEASUREMENT_COLUMNS = """
     m.id, m.ts, m.weight_kg, m.stdev_kg, m.tare_kg, m.corners_json,
     m.duration_s, m.raw_kg, m.cal_json, m.battery_pct, m.user_id,
-    m.assign_method, m.assign_confidence
+    m.assign_method, m.assign_confidence, m.source
 """
 
 
@@ -154,6 +160,71 @@ class Database:
                 raise RuntimeError("SQLite did not return an inserted row id")
             return cursor.lastrowid
 
+    def insert_manual(
+        self, user_id: int, weight_kg: float, timestamp: float
+    ) -> int:
+        """Insert a hand-entered historical measurement for one user."""
+        if self.get_user(user_id) is None:
+            raise KeyError(f"unknown user id {user_id}")
+        if not math.isfinite(weight_kg) or weight_kg <= 0.0:
+            raise ValueError("weight must be finite and positive")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO measurements(
+                    ts, weight_kg, stdev_kg, tare_kg, corners_json, duration_s,
+                    raw_kg, cal_json, battery_pct, user_id, assign_method,
+                    assign_confidence, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    format_timestamp(timestamp),
+                    weight_kg,
+                    0.0,
+                    0.0,
+                    "{}",
+                    0.0,
+                    None,
+                    None,
+                    None,
+                    user_id,
+                    "entered",
+                    None,
+                    "manual",
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("SQLite did not return an inserted row id")
+            return cursor.lastrowid
+
+    def delete_manual_measurement(
+        self, measurement_id: int, *, timestamp: float | None = None
+    ) -> None:
+        """Tombstone a hand-entered row while preserving board captures."""
+        deleted_ts = format_timestamp(
+            datetime.now(timezone.utc).timestamp() if timestamp is None else timestamp
+        )
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT source, deleted_ts FROM measurements WHERE id = ?",
+                (measurement_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown measurement id {measurement_id}")
+            if row[0] != "manual":
+                raise ValueError("only manually entered measurements can be deleted")
+            if row[1] is not None:
+                raise KeyError(f"unknown measurement id {measurement_id}")
+            cursor = connection.execute(
+                """
+                UPDATE measurements SET deleted_ts = ?
+                WHERE id = ? AND deleted_ts IS NULL
+                """,
+                (deleted_ts, measurement_id),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(f"unknown measurement id {measurement_id}")
+
     def fetch_recent(self, n: int = 10) -> list[Measurement]:
         """Return up to ``n`` measurements, newest first."""
         if n < 0:
@@ -163,6 +234,7 @@ class Database:
                 f"""
                 SELECT {_MEASUREMENT_COLUMNS}
                 FROM measurements
+                WHERE deleted_ts IS NULL
                 ORDER BY ts DESC, id DESC
                 LIMIT ?
                 """,
@@ -178,7 +250,7 @@ class Database:
                 f"""
                 SELECT {_MEASUREMENT_COLUMNS}
                 FROM measurements
-                WHERE ts >= ?
+                WHERE deleted_ts IS NULL AND ts >= ?
                 ORDER BY ts ASC, id ASC
                 """,
                 (since_text,),
@@ -192,6 +264,7 @@ class Database:
                 f"""
                 SELECT {_MEASUREMENT_COLUMNS}
                 FROM measurements
+                WHERE deleted_ts IS NULL
                 ORDER BY ts ASC, id ASC
                 """
             ).fetchall()
@@ -201,7 +274,7 @@ class Database:
         self, since: date | datetime | str | None = None
     ) -> list[Measurement]:
         """Return unassigned and visible-user measurements, oldest first."""
-        conditions = ["(m.user_id IS NULL OR u.hidden = 0)"]
+        conditions = ["m.deleted_ts IS NULL", "(m.user_id IS NULL OR u.hidden = 0)"]
         parameters: list[object] = []
         if since is not None:
             conditions.append("m.ts >= ?")
@@ -229,7 +302,8 @@ class Database:
                 SELECT {_JOINED_MEASUREMENT_COLUMNS}
                 FROM measurements AS m
                 LEFT JOIN users AS u ON u.id = m.user_id
-                WHERE m.user_id IS NULL OR u.hidden = 0
+                WHERE m.deleted_ts IS NULL
+                  AND (m.user_id IS NULL OR u.hidden = 0)
                 ORDER BY m.ts DESC, m.id DESC
                 LIMIT ?
                 """,
@@ -241,7 +315,11 @@ class Database:
         """Return one measurement by id, or ``None`` when absent."""
         with self._connect() as connection:
             row = connection.execute(
-                f"SELECT {_MEASUREMENT_COLUMNS} FROM measurements WHERE id = ?",
+                f"""
+                SELECT {_MEASUREMENT_COLUMNS}
+                FROM measurements
+                WHERE id = ? AND deleted_ts IS NULL
+                """,
                 (measurement_id,),
             ).fetchone()
         return _row_to_measurement(row) if row is not None else None
@@ -397,9 +475,9 @@ class Database:
         self,
         user_id: int,
         *,
-        mu_kg: float,
-        sigma_kg: float,
-        last_seen_ts: str,
+        mu_kg: float | None,
+        sigma_kg: float | None,
+        last_seen_ts: str | None,
         weigh_count: int,
     ) -> User:
         """Persist a recognition-model update."""
@@ -435,7 +513,7 @@ class Database:
                 """
                 UPDATE measurements
                 SET user_id = ?, assign_method = ?, assign_confidence = ?
-                WHERE id = ?
+                WHERE id = ? AND deleted_ts IS NULL
                 """,
                 (user_id, method, confidence, measurement_id),
             )
@@ -443,13 +521,13 @@ class Database:
             raise KeyError(f"unknown measurement id {measurement_id}")
 
     def unassign_measurement(self, measurement_id: int) -> None:
-        """Clear an assignment; prior belief updates are intentionally retained."""
+        """Clear an assignment so the caller can replay the user's belief."""
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE measurements
                 SET user_id = NULL, assign_method = NULL, assign_confidence = NULL
-                WHERE id = ?
+                WHERE id = ? AND deleted_ts IS NULL
                 """,
                 (measurement_id,),
             )
@@ -470,7 +548,7 @@ class Database:
         sql = f"""
             SELECT {_MEASUREMENT_COLUMNS}
             FROM measurements
-            WHERE {where}
+            WHERE deleted_ts IS NULL AND ({where})
             ORDER BY ts {direction}, id {direction}
         """
         values = parameters
@@ -549,6 +627,7 @@ def _row_to_measurement(row: tuple[object, ...]) -> Measurement:
         user_id,
         assign_method,
         assign_confidence,
+        source,
     ) = row
     timestamp = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
     corners = json.loads(str(corners_json))
@@ -570,6 +649,7 @@ def _row_to_measurement(row: tuple[object, ...]) -> Measurement:
         assign_confidence=(
             float(assign_confidence) if assign_confidence is not None else None
         ),
+        source=str(source) if source is not None else None,
     )
 
 

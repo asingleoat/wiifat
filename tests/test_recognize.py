@@ -7,6 +7,7 @@ from wiifat.recognize import (
     UserModel,
     predictive_sigma,
     recognize,
+    replay_belief,
     update_belief,
 )
 
@@ -56,6 +57,18 @@ def test_kalman_update_matches_closed_form():
     )
     assert updated.weigh_count == 4
     assert updated.last_seen_ts == DAY
+
+
+def test_replay_belief_resets_prior_and_folds_ascending_observations():
+    seeded = user(65.0, sigma=0.5, last_seen=10 * DAY, count=99)
+    observations = [(70.0, DAY), (71.0, 2 * DAY)]
+    unseeded = UserModel(seeded.id, seeded.name, None, None, None, 0)
+    expected = update_belief(
+        update_belief(unseeded, *observations[0]), *observations[1]
+    )
+
+    assert replay_belief(seeded, observations) == expected
+    assert replay_belief(seeded, []) == unseeded
 
 
 def test_two_nearby_users_are_ambiguous_at_the_midpoint():

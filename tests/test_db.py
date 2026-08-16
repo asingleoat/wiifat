@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 
 from wiifat.colors import user_color
-from wiifat.db import Database, DuplicateUserNameError
+from wiifat.db import Database, DuplicateUserNameError, format_timestamp
 from wiifat.statemachine import Measurement
 
 
@@ -37,6 +37,7 @@ def test_database_round_trip(tmp_path):
     assert recent[0].cal_json == '{"version":2}'
     assert recent[0].battery_pct == 73
     assert recent[0].corners == {"top-left": 18.1, "top-right": 18.3}
+    assert recent[0].source is None
 
     since = database.fetch_since(date(2023, 11, 15))
     assert [item.weight_kg for item in since] == [69.8]
@@ -112,6 +113,8 @@ def test_database_migrates_old_schema_and_preserves_old_rows(tmp_path):
         "user_id",
         "assign_method",
         "assign_confidence",
+        "source",
+        "deleted_ts",
     } <= columns
     connection = sqlite3.connect(path)
     user_column_info = connection.execute("PRAGMA table_info(users)").fetchall()
@@ -142,6 +145,80 @@ def test_database_migrates_old_schema_and_preserves_old_rows(tmp_path):
     assert old_row.user_id is None
     assert old_row.assign_method is None
     assert old_row.assign_confidence is None
+    assert old_row.source is None
+
+
+def test_insert_manual_round_trip_and_validation(tmp_path):
+    database = Database(tmp_path / "manual.sqlite3")
+    user = database.create_user("Alice", timestamp=1_700_000_000.0)
+    timestamp = 1_700_086_400.0
+
+    measurement_id = database.insert_manual(user.id, 70.25, timestamp)
+    stored = database.fetch_measurement(measurement_id)
+
+    assert stored is not None
+    assert stored.timestamp == pytest.approx(timestamp)
+    assert stored.weight_kg == pytest.approx(70.25)
+    assert stored.stdev_kg == 0.0
+    assert stored.tare_kg == 0.0
+    assert stored.corners == {}
+    assert stored.duration_s == 0.0
+    assert stored.raw_kg is None
+    assert stored.cal_json is None
+    assert stored.battery_pct is None
+    assert stored.user_id == user.id
+    assert stored.assign_method == "entered"
+    assert stored.assign_confidence is None
+    assert stored.source == "manual"
+    assert database.fetch_for_user(user.id) == [stored]
+
+    with pytest.raises(KeyError, match="unknown user id"):
+        database.insert_manual(9999, 70.0, timestamp)
+    for bad_weight in (0.0, -1.0, float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite and positive"):
+            database.insert_manual(user.id, bad_weight, timestamp)
+
+
+def test_delete_manual_measurement_protects_board_captures(tmp_path):
+    database = Database(tmp_path / "delete-manual.sqlite3")
+    user = database.create_user("Alice", timestamp=1_700_000_000.0)
+    manual_id = database.insert_manual(user.id, 70.25, 1_700_000_100.0)
+    board_id = database.insert(measurement(1_700_000_200.0, 70.5))
+    deleted_at = 1_700_000_300.0
+
+    database.delete_manual_measurement(manual_id, timestamp=deleted_at)
+    assert database.fetch_measurement(manual_id) is None
+    assert database.fetch_for_user(user.id) == []
+    assert [item.id for item in database.fetch_recent()] == [board_id]
+    assert [item.id for item in database.fetch_since("1970-01-01")] == [board_id]
+    assert [item.id for item in database.fetch_all()] == [board_id]
+    assert [item.id for item in database.fetch_dashboard_measurements()] == [
+        board_id
+    ]
+    assert [item.id for item in database.fetch_dashboard_recent()] == [board_id]
+
+    connection = sqlite3.connect(database.path)
+    raw_row = connection.execute(
+        "SELECT id, deleted_ts FROM measurements WHERE id = ?", (manual_id,)
+    ).fetchone()
+    connection.close()
+    assert raw_row == (manual_id, format_timestamp(deleted_at))
+
+    with pytest.raises(KeyError, match="unknown measurement id"):
+        database.delete_manual_measurement(manual_id)
+    with pytest.raises(KeyError, match="unknown measurement id"):
+        database.assign_measurement(
+            manual_id, user.id, method="manual", confidence=None
+        )
+    with pytest.raises(KeyError, match="unknown measurement id"):
+        database.unassign_measurement(manual_id)
+
+    board_row = database.fetch_measurement(board_id)
+    assert board_row is not None
+    assert board_row.source is None
+    with pytest.raises(ValueError, match="only manually entered"):
+        database.delete_manual_measurement(board_id)
+    assert database.fetch_measurement(board_id) == board_row
 
 
 def test_user_crud_assignment_and_filtered_measurements(tmp_path):

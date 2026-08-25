@@ -98,6 +98,14 @@ def test_flask_user_recognition_claim_unassign_chart_and_apis(tmp_path):
     assert b"window.location.reload()" in dashboard.data
     assert b"data.assigned" in dashboard.data
     assert b'resultNote.textContent = "recorded"' in dashboard.data
+    assert b'chart.png?window=month' in dashboard.data
+    assert b'<option value="month" selected>Last month</option>' in dashboard.data
+
+    dashboard_year = client.get("/?window=year")
+    assert dashboard_year.status_code == 200
+    assert b'chart.png?window=year' in dashboard_year.data
+    assert b'<option value="year" selected>Last year</option>' in dashboard_year.data
+    assert client.get("/?window=bogus").status_code == 400
 
     user_page = client.get(f"/user/{alice.id}")
     assert user_page.status_code == 200
@@ -110,6 +118,14 @@ def test_flask_user_recognition_claim_unassign_chart_and_apis(tmp_path):
     assert f'action="/users/{alice.id}/hidden"'.encode() in user_page.data
     assert b"Hide from dashboard" in user_page.data
     assert b'getElementById("hidden-user-toggle")' in user_page.data
+    assert f'/chart/{alice.id}.png?window=month'.encode() in user_page.data
+    assert b'<option value="month" selected>Last month</option>' in user_page.data
+
+    user_page_year = client.get(f"/user/{alice.id}?window=year")
+    assert user_page_year.status_code == 200
+    assert f'/chart/{alice.id}.png?window=year'.encode() in user_page_year.data
+    assert b'<option value="year" selected>Last year</option>' in user_page_year.data
+    assert client.get(f"/user/{alice.id}?window=bogus").status_code == 400
 
     expected_color = color_from_key(str(reroll_timestamp))
     assert expected_color != user_color("Alice")
@@ -152,6 +168,17 @@ def test_flask_user_recognition_claim_unassign_chart_and_apis(tmp_path):
     chart = client.get(f"/chart/{alice.id}.png")
     assert chart.status_code == 200
     assert chart.data.startswith(b"\x89PNG\r\n\x1a\n")
+    for chart_url in (
+        "/chart.png?window=all",
+        "/chart.png?window=year",
+        f"/chart/{alice.id}.png?window=all",
+        f"/chart/{alice.id}.png?window=year",
+    ):
+        chart_response = client.get(chart_url)
+        assert chart_response.status_code == 200
+        assert chart_response.data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert client.get("/chart.png?window=bogus").status_code == 400
+    assert client.get(f"/chart/{alice.id}.png?window=bogus").status_code == 400
 
     users_json = client.get("/api/users").get_json()
     assert isinstance(users_json, list)

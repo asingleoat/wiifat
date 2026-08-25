@@ -88,6 +88,13 @@ def _rename_error(message: str, status: int, wants_json: bool) -> Response:
     return Response(message, status=status, mimetype="text/plain")
 
 
+def _requested_chart_window() -> chart.ChartWindow:
+    try:
+        return chart.chart_window(request.args.get("window"))
+    except ValueError as exc:
+        abort(400, str(exc))
+
+
 _STYLE = """
 <style>
 body { font-family: sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; color: #222; }
@@ -120,7 +127,13 @@ _DASHBOARD = """
   <div id="live-battery" class="muted">{% if status.battery_pct is not none %}Battery {{ status.battery_pct }}%{% endif %}</div>
 </div>
 
-<img class="chart" src="{{ url_for('chart_all') }}" alt="Weight chart">
+<form class="chart-window" method="get" action="{{ url_for('dashboard') }}">
+  <label>Show <select name="window" onchange="this.form.submit()">
+    {% for option in windows %}<option value="{{ option.key }}"{% if option.key == window.key %} selected{% endif %}>{{ option.label }}</option>{% endfor %}
+  </select></label>
+  <noscript><button type="submit">Show</button></noscript>
+</form>
+<img class="chart" src="{{ url_for('chart_all', window=window.key) }}" alt="Weight chart">
 
 <h2>Users</h2>
 <form method="post" action="{{ url_for('create_user_route') }}">
@@ -267,7 +280,13 @@ _USER_PAGE = """
 <p>{{ history|length }} assigned measurements. Model:
 {% if user.mu_kg is not none %}μ {{ user.mu_kg|weight }},
 σ {{ user.sigma_kg|weight }}{% else %}unseeded{% endif %}.</p>
-<img class="chart" src="{{ url_for('chart_user', user_id=user.id) }}" alt="{{ user.name }} chart">
+<form class="chart-window" method="get" action="{{ url_for('user_page', user_id=user.id) }}">
+  <label>Show <select name="window" onchange="this.form.submit()">
+    {% for option in windows %}<option value="{{ option.key }}"{% if option.key == window.key %} selected{% endif %}>{{ option.label }}</option>{% endfor %}
+  </select></label>
+  <noscript><button type="submit">Show</button></noscript>
+</form>
+<img class="chart" src="{{ url_for('chart_user', user_id=user.id, window=window.key) }}" alt="{{ user.name }} chart">
 <h2>Add historical entry</h2>
 <form method="post" action="{{ url_for('add_manual_measurement_route', user_id=user.id) }}">
   <label>Weight <input name="weight" type="number" min="0.01" step="0.01" required></label>
@@ -528,6 +547,7 @@ def create_app(
 
     @app.get("/")
     def dashboard() -> str:
+        window = _requested_chart_window()
         all_users = database.list_users()
         users = [user for user in all_users if not user.hidden]
         latest = database.fetch_dashboard_recent(20)
@@ -550,10 +570,13 @@ def create_app(
             users_by_id={user.id: user for user in all_users},
             unassigned_color=UNASSIGNED_COLOR,
             pounds_per_kg=POUNDS_PER_KG,
+            window=window,
+            windows=chart.CHART_WINDOWS,
         )
 
     @app.get("/user/<int:user_id>")
     def user_page(user_id: int) -> str:
+        window = _requested_chart_window()
         user = database.get_user(user_id)
         if user is None:
             abort(404)
@@ -564,18 +587,32 @@ def create_app(
             user=user,
             history=database.fetch_for_user(user_id, newest_first=True),
             rename_script=_RENAME_SCRIPT,
+            window=window,
+            windows=chart.CHART_WINDOWS,
         )
 
     @app.get("/chart.png")
     def chart_all() -> Response:
-        return Response(chart.render_chart_png(database.path), mimetype="image/png")
+        window = _requested_chart_window()
+        return Response(
+            chart.render_chart_png(
+                database.path, window.days, now=time_fn()
+            ),
+            mimetype="image/png",
+        )
 
     @app.get("/chart/<int:user_id>.png")
     def chart_user(user_id: int) -> Response:
+        window = _requested_chart_window()
         if database.get_user(user_id) is None:
             abort(404)
         return Response(
-            chart.render_chart_png(database.path, user_id=user_id),
+            chart.render_chart_png(
+                database.path,
+                window.days,
+                user_id=user_id,
+                now=time_fn(),
+            ),
             mimetype="image/png",
         )
 

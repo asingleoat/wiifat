@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import time
+from dataclasses import dataclass
 from io import BytesIO
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -25,6 +27,30 @@ _SECONDS_PER_DAY = 86_400.0
 _SECONDS_PER_WEEK = 7.0 * _SECONDS_PER_DAY
 _SLOPE_WINDOW_DAYS = 14.0
 _MIN_SLOPE_SPAN_DAYS = 2.0
+
+
+@dataclass(frozen=True)
+class ChartWindow:
+    key: str
+    label: str
+    days: int | None
+
+
+CHART_WINDOWS: tuple[ChartWindow, ...] = (
+    ChartWindow("month", "Last month", 30),
+    ChartWindow("year", "Last year", 365),
+    ChartWindow("all", "All time", None),
+)
+DEFAULT_CHART_WINDOW = "month"
+
+
+def chart_window(key: str | None) -> ChartWindow:
+    """Return the configured chart window named by ``key``."""
+    selected = DEFAULT_CHART_WINDOW if key is None or key == "" else key
+    for window in CHART_WINDOWS:
+        if window.key == selected:
+            return window
+    raise ValueError(f"unknown chart window {selected!r}")
 
 
 def ewma_trend(
@@ -108,9 +134,10 @@ def render_chart(
     days: int | None = None,
     *,
     user_id: int | None = None,
+    now: float | None = None,
 ) -> Path:
     """Save weight scatter and per-user trends, returning the output path."""
-    png = render_chart_png(db_path, days, user_id=user_id)
+    png = render_chart_png(db_path, days, user_id=user_id, now=now)
     output_path = Path(out).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(png)
@@ -122,9 +149,10 @@ def render_chart_png(
     days: int | None = None,
     *,
     user_id: int | None = None,
+    now: float | None = None,
 ) -> bytes:
     """Render a general or per-user history chart as PNG bytes."""
-    figure = render_chart_figure(db_path, days, user_id=user_id)
+    figure = render_chart_figure(db_path, days, user_id=user_id, now=now)
     output = BytesIO()
     figure.savefig(output, format="png", dpi=140)
     plt.close(figure)
@@ -136,26 +164,25 @@ def render_chart_figure(
     days: int | None = None,
     *,
     user_id: int | None = None,
+    now: float | None = None,
 ):
     """Build a history chart figure; the caller owns closing it."""
     if days is not None and days < 0:
         raise ValueError("days must be nonnegative")
+    reference_time = time.time() if now is None else float(now)
+    cutoff = (
+        None
+        if days is None
+        else reference_time - days * _SECONDS_PER_DAY
+    )
 
     database = Database(db_path)
     selected_user = None
     if user_id is not None:
         selected_user = database.get_user(user_id)
         measurements = database.fetch_for_user(user_id)
-        if days is not None:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
-            measurements = [item for item in measurements if item.timestamp >= cutoff]
     else:
-        since = (
-            None
-            if days is None
-            else datetime.now(timezone.utc) - timedelta(days=days)
-        )
-        measurements = database.fetch_dashboard_measurements(since)
+        measurements = database.fetch_dashboard_measurements()
 
     figure, axis = plt.subplots(figsize=(9, 5))
     if user_id is not None:
@@ -165,6 +192,7 @@ def render_chart_figure(
             name,
             selected_user.color if selected_user is not None else UNASSIGNED_COLOR,
             [(item.timestamp, item.weight_kg) for item in measurements],
+            cutoff=cutoff,
         )
     else:
         users = {user.id: user for user in database.list_visible_users()}
@@ -180,9 +208,14 @@ def render_chart_figure(
                 known_user.name,
                 known_user.color,
                 grouped[known_user.id],
+                cutoff=cutoff,
             )
         if None in grouped:
-            unassigned = grouped[None]
+            unassigned = [
+                sample
+                for sample in grouped[None]
+                if cutoff is None or sample[0] >= cutoff
+            ]
             axis.scatter(
                 [_as_datetime(timestamp) for timestamp, _ in unassigned],
                 [weight for _, weight in unassigned],
@@ -191,7 +224,10 @@ def render_chart_figure(
                 color=UNASSIGNED_COLOR,
                 label="Unassigned",
             )
-    axis.set_title("Weight history" if user_id is None else "User weight history")
+    title = "Weight history" if user_id is None else "User weight history"
+    if days is not None:
+        title += f" (last {days} days)"
+    axis.set_title(title)
     axis.set_xlabel("Date (UTC)")
     axis.set_ylabel("Weight (kg)")
     axis.grid(alpha=0.25)
@@ -199,6 +235,8 @@ def render_chart_figure(
     if handles:
         axis.legend(handles, labels)
     figure.autofmt_xdate()
+    if cutoff is not None:
+        axis.set_xlim(_as_datetime(cutoff), _as_datetime(reference_time))
     pounds_axis = axis.twinx()
     low, high = axis.get_ylim()
     pounds_axis.set_ylim(low * POUNDS_PER_KG, high * POUNDS_PER_KG)
@@ -212,12 +250,32 @@ def _plot_user(
     name: str,
     color: str,
     samples: Sequence[tuple[float, float]],
+    *,
+    cutoff: float | None = None,
 ) -> None:
-    trend = ewma_trend(samples)
+    full_trend = ewma_trend(samples)
+    plotted_samples = [
+        sample for sample in samples if cutoff is None or sample[0] >= cutoff
+    ]
+    if not plotted_samples:
+        return
+    if cutoff is None:
+        trend = full_trend
+    else:
+        trend = [point for point in full_trend if point[0] >= cutoff]
+        before = next(
+            (point for point in reversed(full_trend) if point[0] < cutoff),
+            None,
+        )
+        if before is not None and trend and trend[0][0] > cutoff:
+            after = trend[0]
+            fraction = (cutoff - before[0]) / (after[0] - before[0])
+            boundary_weight = before[1] + fraction * (after[1] - before[1])
+            trend.insert(0, (cutoff, boundary_weight))
     has_curve = len(trend) >= 2
     axis.scatter(
-        [_as_datetime(timestamp) for timestamp, _ in samples],
-        [weight for _, weight in samples],
+        [_as_datetime(timestamp) for timestamp, _ in plotted_samples],
+        [weight for _, weight in plotted_samples],
         s=18,
         alpha=0.35,
         color=color,
@@ -225,7 +283,7 @@ def _plot_user(
     )
     if not has_curve:
         return
-    slope = trend_slope_kg_per_week(trend)
+    slope = trend_slope_kg_per_week(full_trend)
     label = name if slope is None else f"{name} ({slope:+.2f} kg/wk)"
     axis.plot(
         [_as_datetime(timestamp) for timestamp, _ in trend],
@@ -244,7 +302,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", help="measurement database path")
     parser.add_argument("--out", default="weight.png", help="output PNG path")
-    parser.add_argument("--days", type=int, help="only include the last N days")
+    parser.add_argument(
+        "--days",
+        type=int,
+        help="plot only the last N days (trend uses full history)",
+    )
     parser.add_argument("--user", type=int, help="only include one user id")
     args = parser.parse_args(argv)
     render_chart(args.db, args.out, args.days, user_id=args.user)

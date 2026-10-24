@@ -179,14 +179,14 @@ def test_insert_manual_round_trip_and_validation(tmp_path):
             database.insert_manual(user.id, bad_weight, timestamp)
 
 
-def test_delete_manual_measurement_protects_board_captures(tmp_path):
-    database = Database(tmp_path / "delete-manual.sqlite3")
+def test_delete_measurement_protects_assigned_board_captures(tmp_path):
+    database = Database(tmp_path / "delete.sqlite3")
     user = database.create_user("Alice", timestamp=1_700_000_000.0)
     manual_id = database.insert_manual(user.id, 70.25, 1_700_000_100.0)
     board_id = database.insert(measurement(1_700_000_200.0, 70.5))
     deleted_at = 1_700_000_300.0
 
-    database.delete_manual_measurement(manual_id, timestamp=deleted_at)
+    database.delete_measurement(manual_id, timestamp=deleted_at)
     assert database.fetch_measurement(manual_id) is None
     assert database.fetch_for_user(user.id) == []
     assert [item.id for item in database.fetch_recent()] == [board_id]
@@ -205,7 +205,7 @@ def test_delete_manual_measurement_protects_board_captures(tmp_path):
     assert raw_row == (manual_id, format_timestamp(deleted_at))
 
     with pytest.raises(KeyError, match="unknown measurement id"):
-        database.delete_manual_measurement(manual_id)
+        database.delete_measurement(manual_id)
     with pytest.raises(KeyError, match="unknown measurement id"):
         database.assign_measurement(
             manual_id, user.id, method="manual", confidence=None
@@ -213,12 +213,33 @@ def test_delete_manual_measurement_protects_board_captures(tmp_path):
     with pytest.raises(KeyError, match="unknown measurement id"):
         database.unassign_measurement(manual_id)
 
+    database.assign_measurement(
+        board_id, user.id, method="manual", confidence=None
+    )
     board_row = database.fetch_measurement(board_id)
     assert board_row is not None
     assert board_row.source is None
-    with pytest.raises(ValueError, match="only manually entered"):
-        database.delete_manual_measurement(board_id)
+    assert board_row.user_id == user.id
+    with pytest.raises(ValueError, match="assigned board measurements cannot be deleted"):
+        database.delete_measurement(board_id)
     assert database.fetch_measurement(board_id) == board_row
+
+    database.unassign_measurement(board_id)
+    assert [item.id for item in database.fetch_unassigned()] == [board_id]
+    database.delete_measurement(board_id, timestamp=deleted_at)
+    assert database.fetch_recent() == []
+    assert database.fetch_unassigned() == []
+    assert database.fetch_measurement(board_id) is None
+
+    connection = sqlite3.connect(database.path)
+    raw_row = connection.execute(
+        "SELECT id, deleted_ts FROM measurements WHERE id = ?", (board_id,)
+    ).fetchone()
+    connection.close()
+    assert raw_row == (board_id, format_timestamp(deleted_at))
+
+    with pytest.raises(KeyError, match="unknown measurement id"):
+        database.delete_measurement(board_id)
 
 
 def test_user_crud_assignment_and_filtered_measurements(tmp_path):

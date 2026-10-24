@@ -197,22 +197,22 @@ class Database:
                 raise RuntimeError("SQLite did not return an inserted row id")
             return cursor.lastrowid
 
-    def delete_manual_measurement(
+    def delete_measurement(
         self, measurement_id: int, *, timestamp: float | None = None
     ) -> None:
-        """Tombstone a hand-entered row while preserving board captures."""
+        """Tombstone a manual or unclaimed measurement."""
         deleted_ts = format_timestamp(
             datetime.now(timezone.utc).timestamp() if timestamp is None else timestamp
         )
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT source, deleted_ts FROM measurements WHERE id = ?",
+                "SELECT source, deleted_ts, user_id FROM measurements WHERE id = ?",
                 (measurement_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"unknown measurement id {measurement_id}")
-            if row[0] != "manual":
-                raise ValueError("only manually entered measurements can be deleted")
+            if row[0] != "manual" and row[2] is not None:
+                raise ValueError("assigned board measurements cannot be deleted")
             if row[1] is not None:
                 raise KeyError(f"unknown measurement id {measurement_id}")
             cursor = connection.execute(

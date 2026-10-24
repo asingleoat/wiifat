@@ -165,6 +165,30 @@ def test_flask_user_recognition_claim_unassign_chart_and_apis(tmp_path):
         database, bob.id, UserModel(bob.id, bob.name, None, None, None, 0)
     )
 
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    unclaimed_table = dashboard.data.split(b"<h2>Unclaimed</h2>", 1)[1].split(
+        b"</table>", 1
+    )[0]
+    delete_form = (
+        f'<form class="inline" method="post" action="/measurements/{visitor_id}/delete">'
+        '\n    <button type="submit">Delete</button>\n  </form>'
+    ).encode()
+    assert delete_form in unclaimed_table
+    assert b"90.00 kg" in dashboard.data
+    api_rows = client.get("/api/measurements").get_json()
+    assert visitor_id in [item["id"] for item in api_rows]
+
+    delete_response = client.post(f"/measurements/{visitor_id}/delete")
+    assert delete_response.status_code == 302
+    assert delete_response.location.endswith("/")
+    dashboard = client.get(delete_response.location)
+    assert dashboard.status_code == 200
+    assert b"90.00 kg" not in dashboard.data
+    assert database.fetch_measurement(visitor_id) is None
+    api_rows = client.get("/api/measurements").get_json()
+    assert visitor_id not in [item["id"] for item in api_rows]
+
     chart = client.get(f"/chart/{alice.id}.png")
     assert chart.status_code == 200
     assert chart.data.startswith(b"\x89PNG\r\n\x1a\n")
@@ -456,6 +480,9 @@ def test_manual_measurement_local_times_and_delete_route(tmp_path):
     )
     assert assign_response.status_code == 302
     assert database.get_user(user.id).weigh_count == 2
+    assert database.fetch_measurement(board_id).user_id == user.id
+    assert client.post(f"/measurements/{board_id}/delete").status_code == 400
+    assert database.fetch_measurement(board_id) is not None
     unassign_response = client.post(
         "/unassign", data={"measurement_id": board_id}
     )
@@ -470,8 +497,8 @@ def test_manual_measurement_local_times_and_delete_route(tmp_path):
         database, user.id, UserModel(user.id, user.name, None, None, None, 0)
     )
 
-    assert client.post(f"/measurements/{board_id}/delete").status_code == 400
-    assert database.fetch_measurement(board_id) is not None
+    assert client.post(f"/measurements/{board_id}/delete").status_code == 302
+    assert database.fetch_measurement(board_id) is None
     assert client.post("/measurements/9999/delete").status_code == 404
 
 

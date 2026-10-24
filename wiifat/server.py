@@ -164,6 +164,9 @@ _DASHBOARD = """
     <input name="name" required size="10" placeholder="New name">
     <button type="submit">Create &amp; claim</button>
   </form>
+  <form class="inline" method="post" action="{{ url_for('delete_measurement_route', measurement_id=item.id) }}">
+    <button type="submit">Delete</button>
+  </form>
 </td></tr>{% else %}<tr><td colspan="3">Nothing waiting for a claim.</td></tr>{% endfor %}</table>
 
 <h2>Latest weigh-ins</h2>
@@ -297,7 +300,7 @@ _USER_PAGE = """
 </form>
 <table><tr><th>Time</th><th>Weight</th><th>Method</th><th></th></tr>
 {% for item in history %}<tr><td>{{ item.timestamp|timestamp }}</td><td>{{ item.weight_kg|weight }}</td>
-<td>{{ item.assign_method or '—' }}</td><td>{% if item.source == 'manual' %}<form class="inline" method="post" action="{{ url_for('delete_manual_measurement_route', measurement_id=item.id) }}"><button type="submit">Delete</button></form>{% else %}<form method="post" action="{{ url_for('unassign_route') }}"><input type="hidden" name="measurement_id" value="{{ item.id }}"><button>Unassign</button></form>{% endif %}</td></tr>
+<td>{{ item.assign_method or '—' }}</td><td>{% if item.source == 'manual' %}<form class="inline" method="post" action="{{ url_for('delete_measurement_route', measurement_id=item.id) }}"><button type="submit">Delete</button></form>{% else %}<form method="post" action="{{ url_for('unassign_route') }}"><input type="hidden" name="measurement_id" value="{{ item.id }}"><button>Unassign</button></form>{% endif %}</td></tr>
 {% endfor %}</table>
 {{ rename_script|safe }}
 <script>
@@ -723,12 +726,12 @@ def create_app(
         return redirect(url_for("user_page", user_id=user_id))
 
     @app.post("/measurements/<int:measurement_id>/delete")
-    def delete_manual_measurement_route(measurement_id: int) -> Response:
+    def delete_measurement_route(measurement_id: int) -> Response:
         try:
             measurement = database.fetch_measurement(measurement_id)
             if measurement is None:
                 raise KeyError(f"unknown measurement id {measurement_id}")
-            database.delete_manual_measurement(
+            database.delete_measurement(
                 measurement_id, timestamp=time_fn()
             )
             if measurement.user_id is not None:
